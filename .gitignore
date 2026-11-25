@@ -1,0 +1,9 @@
+# Build output and scratch: never committed to main
+/site/
+/.work/
+
+# Private keys never belong in this repository (scripts/check-workflows.py also looks inside files)
+*.pem
+*.key
+*.p12
+!keys/addon-index.pub

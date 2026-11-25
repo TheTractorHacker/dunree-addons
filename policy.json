@@ -1,0 +1,6 @@
+{
+  "reserved_words": ["dunree", "foleyit", "foley it"],
+  "reserved_id_prefixes": ["ie.foleyit.", "dunree.", "io.dunree.", "com.dunree.", "org.dunree."],
+  "official_ids": [],
+  "repository_moves": {}
+}

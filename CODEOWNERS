@@ -1,0 +1,9 @@
+# Every change needs the review of the store maintainer. The paths that decide
+# what gets signed are listed on their own so that the rule survives a later
+# change of the first line.
+*                   @TheTractorHacker
+/.github/           @TheTractorHacker
+/scripts/           @TheTractorHacker
+/keys/              @TheTractorHacker
+/policy.json        @TheTractorHacker
+/addons/            @TheTractorHacker

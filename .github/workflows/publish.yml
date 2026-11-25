@@ -1,0 +1,118 @@
+# Publishes the store when main changes.
+#
+# Signing in this workflow needs the repository secret ADDON_INDEX_KEY: the
+# private add-on index key, PEM, base64 encoded. When it is not set the run
+# FAILS and publishes NOTHING, so the store that is online keeps its last signed
+# index. An unsigned index is never deployed.
+#
+# For the higher-assurance flow (the key never leaves the maintainer's machine,
+# scripts/sign-and-publish.sh pushes to gh-pages) set the repository variable
+# PUBLISH_MODE to "offline": this workflow then only builds the draft and
+# publishes nothing.
+name: Publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-pages
+  cancel-in-progress: false
+
+env:
+  DUNREE_REPO: ${{ vars.DUNREE_REPO || 'https://github.com/TheTractorHacker/dunree.git' }}
+  DUNREE_REF: ${{ vars.DUNREE_REF || 'prod' }}
+  STORE_URL: ${{ vars.STORE_URL || 'https://thetractorhacker.github.io/dunree-addons' }}
+  PUBLISH_MODE: ${{ vars.PUBLISH_MODE || 'ci' }}
+
+jobs:
+  build:
+    name: Build and sign
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Keep ADDON_INDEX_KEY as a secret of this environment, with "Deployment branches"
+    # set to main only: then a workflow pushed to any other branch cannot read it
+    # (docs/key-handling.md). A repository secret of that name also works, less tightly.
+    environment:
+      name: addon-signing
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
+      deploy: ${{ steps.mode.outputs.deploy }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Workflows are pinned, no private key in the tree
+        run: python3 scripts/check-workflows.py
+
+      # The serial is the UTC time of the run. build.sh fetches the published
+      # index from $STORE_URL/index.json and refuses a serial that is not higher.
+      - name: Build (manifests, serial, artifacts by sha256, index, page)
+        run: |
+          SERIAL="$(date -u +%Y%m%d%H%M%S)" scripts/build.sh
+
+      - name: Mode
+        id: mode
+        run: |
+          if [ "$PUBLISH_MODE" = offline ]; then
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Offline signing::PUBLISH_MODE is offline: nothing is published from here. Run scripts/sign-and-publish.sh --push on the signing machine."
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sign with ADDON_INDEX_KEY, only if it is set
+        id: sign
+        if: steps.mode.outputs.deploy == 'true'
+        env:
+          ADDON_INDEX_KEY: ${{ secrets.ADDON_INDEX_KEY }}
+        run: |
+          if [ -z "${ADDON_INDEX_KEY:-}" ]; then
+            echo "::error title=SIGNING IS REQUIRED::The secret ADDON_INDEX_KEY is not set. Nothing is published, so the store that is online keeps its last signed index. Set the secret (base64 of the PEM), or set the variable PUBLISH_MODE to offline and publish with scripts/sign-and-publish.sh --push."
+            exit 1
+          fi
+          umask 077
+          key="$RUNNER_TEMP/addon-index.pem"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$ADDON_INDEX_KEY" | base64 --decode > "$key"
+          ADDON_INDEX_KEY_FILE="$key" scripts/sign.sh
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Site for GitHub Pages
+        if: steps.mode.outputs.deploy == 'true'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/
+
+      - name: Keep the draft (offline mode)
+        if: steps.mode.outputs.deploy != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: draft-index-unsigned
+          path: site/
+          if-no-files-found: error
+          retention-days: 14
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: needs.build.outputs.deploy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -1,0 +1,116 @@
+# Checks a pull request: manifests, artifact addresses and checksums, names.
+# Builds an UNSIGNED draft of the index and the text of what the pull request
+# changes in the catalogue. The checks run twice: with the tooling of the pull
+# request, and with the tooling, policy and key of the base branch, which decide.
+# It has no secrets and a read-only token, so it is safe to run on the code of a
+# fork. The comment on the pull request is written
+# by comment.yml, which never runs code of the pull request.
+name: Validate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  DUNREE_REPO: ${{ vars.DUNREE_REPO || 'https://github.com/TheTractorHacker/dunree.git' }}
+  DUNREE_REF: ${{ vars.DUNREE_REF || 'prod' }}
+  STORE_URL: ${{ vars.STORE_URL || 'https://thetractorhacker.github.io/dunree-addons' }}
+
+jobs:
+  # Decides. The tooling, policy and public key of the base branch, run on the
+  # add-ons of the pull request: a pull request cannot weaken the checks that judge
+  # it. No code of the pull request runs in this job (on a runner, code can change
+  # everything that runs after it in the same job), so its tree is only read as data.
+  checks:
+    name: Manifests, artifacts and draft index (tooling of the base branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the pull request (data only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The pull request does not bring the folders this job writes to
+        run: |
+          for p in .base .work site; do
+            if [ -e "$p" ] || [ -L "$p" ]; then
+              echo "::error::The pull request contains $p, which only the build may create."
+              exit 1
+            fi
+          done
+
+      - name: Check out the tooling of the base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .base
+          persist-credentials: false
+
+      - name: Workflows of the pull request are pinned, no private key in its tree
+        run: python3 .base/scripts/check-workflows.py "$GITHUB_WORKSPACE"
+
+      - name: Manifests, download every artifact, compare sha256, build the unsigned draft
+        env:
+          ADDONS_DIR: ${{ github.workspace }}/addons
+          SITE_DIR: ${{ github.workspace }}/site
+          WORK_DIR: ${{ github.workspace }}/.work/base
+        run: .base/scripts/build.sh
+
+      - name: What this pull request changes in the catalogue
+        run: |
+          mkdir -p .work/diff
+          python3 .base/scripts/storetool.py diff --old .work/base/previous-index.json --new site/index.json --out .work/diff/diff.txt
+          {
+            echo '### Catalogue changes'
+            echo
+            echo '```text'
+            sed 's/```/` ` `/g' .work/diff/diff.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the draft index (unsigned)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: draft-index-unsigned
+          path: site/
+          include-hidden-files: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Keep the catalogue diff
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: catalogue-diff
+          path: .work/diff/diff.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  # The tooling of the pull request itself, so that a change to scripts/ is exercised.
+  # It decides nothing on its own: a pull request can make its own scripts say yes.
+  pr-tooling:
+    name: Tooling of the pull request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Workflows are pinned, no private key in the tree
+        run: python3 scripts/check-workflows.py
+
+      - name: Manifests, addresses and names
+        run: python3 scripts/storetool.py validate
+
+      - name: Build the unsigned draft
+        run: scripts/build.sh

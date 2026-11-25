@@ -1,0 +1,81 @@
+# Writes the catalogue diff of a pull request as a comment.
+#
+# A pull request from a fork gets a read-only token, so validate.yml cannot
+# comment. This workflow runs afterwards, from the main branch, with a token
+# that may comment. It checks out nothing and runs nothing of the pull request:
+# the diff is an artifact that is read as text, cut to size and put inside a
+# code block. Whoever wrote the pull request controls that text and nothing else.
+name: Comment catalogue diff
+
+on:
+  workflow_run:
+    workflows: [Validate]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+jobs:
+  comment:
+    name: Comment
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+    steps:
+      - name: Find the pull request of the run
+        id: pr
+        run: |
+          number="$(gh api --method GET "repos/$REPO/pulls" -f state=open -f head="$HEAD_OWNER:$HEAD_BRANCH" \
+            --jq '.[] | select(.head.sha == env.HEAD_SHA) | .number' | head -n 1)"
+          if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+            echo "::notice::No open pull request has $HEAD_SHA as its head any more; nothing to comment."
+            exit 0
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the diff (text, not trusted)
+        if: steps.pr.outputs.number != ''
+        run: gh run download "$RUN_ID" --repo "$REPO" --name catalogue-diff --dir "$RUNNER_TEMP/diff"
+
+      - name: Comment
+        if: steps.pr.outputs.number != ''
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          file="$RUNNER_TEMP/diff/diff.txt"
+          if [ -L "$file" ] || [ ! -f "$file" ]; then
+            echo "::error::The diff artifact is not a plain file."
+            exit 1
+          fi
+          body="$RUNNER_TEMP/body.md"
+          {
+            echo '<!-- dunree-addons-catalogue-diff -->'
+            echo '**What this pull request changes in the catalogue** (unsigned draft, built from the pull request)'
+            echo
+            echo '```text'
+            head -c 50000 "$file" | tr -d '\000-\010\013-\037' | sed 's/```/` ` `/g'
+            echo
+            echo '```'
+            echo
+            echo 'Reviewers: compare this with the diff of the files. An add-on runs as a program on the proxy; check the publisher, the repository of the artifacts and every permission.'
+          } > "$body"
+          existing="$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- dunree-addons-catalogue-diff -->"))) | .id' | head -n 1)"
+          if [[ "$existing" =~ ^[0-9]+$ ]]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$existing" -F body=@"$body" --silent
+          else
+            gh api --method POST "repos/$REPO/issues/$PR/comments" -F body=@"$body" --silent
+          fi
